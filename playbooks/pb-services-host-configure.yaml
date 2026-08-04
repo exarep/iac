@@ -1,0 +1,204 @@
+---
+- name: Discover services host
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Look up services host Elastic IP
+      amazon.aws.ec2_eip_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": exarep-services-host
+          "tag:ManagedBy": exarep-iac
+      register: eip_info
+
+    - name: Validate services host exists
+      ansible.builtin.assert:
+        that:
+          - eip_info.addresses | length > 0
+        fail_msg: "No Elastic IP found for exarep-services-host. Run pb-services-host-create.yaml first."
+
+    - name: Add services host to inventory
+      ansible.builtin.add_host:
+        name: "{{ eip_info.addresses[0].public_ip }}"
+        groups: services
+        ansible_user: ec2-user
+        ansible_ssh_private_key_file: "~/.ssh/exarep"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+    - name: Display discovered host
+      ansible.builtin.debug:
+        msg: "Services host: {{ eip_info.addresses[0].public_ip }}"
+
+- name: Configure EC2 services host
+  hosts: services
+  become: true
+  gather_facts: true
+
+  vars_prompt:
+    - name: rhel_registry_username
+      prompt: "Red Hat registry (registry.redhat.io) username"
+      private: false
+    - name: rhel_registry_password
+      prompt: "Red Hat registry (registry.redhat.io) password"
+      private: true
+    - name: keycloak_admin_password
+      prompt: "Keycloak admin password"
+      private: true
+    - name: keycloak_db_password
+      prompt: "Keycloak database password"
+      private: true
+
+  tasks:
+
+    - name: Install EPEL repository
+      ansible.builtin.dnf:
+        name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+        state: present
+        disable_gpg_check: true
+
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - podman
+          - python3-pip
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+          - firewalld
+          - python3-firewall
+        state: present
+
+    - name: Enable and start firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        enabled: true
+        state: started
+
+    - name: Install podman-compose plugin
+      ansible.builtin.dnf:
+        name: podman-compose
+        enablerepo: epel
+        state: present
+
+    - name: Enable and start Podman socket
+      ansible.builtin.systemd:
+        name: podman.socket
+        enabled: true
+        state: started
+
+    - name: Open firewall ports
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - 443/tcp
+        - 80/tcp
+
+    - name: Allow Nginx to make network connections (SELinux)
+      ansible.builtin.command:
+        cmd: setsebool -P httpd_can_network_connect 1
+      changed_when: false
+
+    - name: Log in to registry.redhat.io
+      ansible.builtin.command:
+        cmd: podman login registry.redhat.io --username {{ rhel_registry_username }} --password {{ rhel_registry_password }}
+      changed_when: false
+      no_log: true
+
+    - name: Create services directory
+      ansible.builtin.file:
+        path: /opt/exarep/services
+        state: directory
+        mode: "0750"
+
+    - name: Template Podman Compose file
+      ansible.builtin.template:
+        src: templates/podman-compose-services.yaml.j2
+        dest: /opt/exarep/services/podman-compose.yaml
+        mode: "0640"
+
+    - name: Start containers
+      ansible.builtin.command:
+        cmd: podman compose up -d
+        chdir: /opt/exarep/services
+      register: compose_up
+      changed_when: "'Creating' in compose_up.stdout or 'Recreating' in compose_up.stdout"
+
+    - name: Wait for Keycloak to be ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/realms/master
+        method: GET
+        status_code: 200
+      register: keycloak_health
+      until: keycloak_health.status == 200
+      retries: 60
+      delay: 10
+
+    - name: Obtain Let's Encrypt certificate
+      ansible.builtin.command:
+        cmd: >
+          certbot certonly --standalone
+          -d {{ keycloak.hostname }}
+          --non-interactive
+          --agree-tos
+          --email admin@{{ base_domain }}
+        creates: /etc/letsencrypt/live/{{ keycloak.hostname }}/fullchain.pem
+
+    - name: Template Nginx configuration
+      ansible.builtin.template:
+        src: templates/nginx-services.conf.j2
+        dest: /etc/nginx/conf.d/services.conf
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Remove default Nginx server block
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+      notify: Reload nginx
+
+    - name: Enable and start Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Enable certbot renewal timer
+      ansible.builtin.systemd:
+        name: certbot-renew.timer
+        enabled: true
+        state: started
+
+    - name: Create Keycloak realms
+      ansible.builtin.command:
+        cmd: >
+          podman exec keycloak
+          /opt/keycloak/bin/kcadm.sh create realms
+          -s realm={{ item }}
+          -s enabled=true
+          --server http://localhost:8080
+          --realm master
+          --user {{ keycloak.admin_user }}
+          --password {{ keycloak_admin_password }}
+      loop: "{{ keycloak.realms }}"
+      register: realm_result
+      changed_when: realm_result.rc == 0
+      failed_when: realm_result.rc != 0 and 'Conflict' not in realm_result.stderr
+
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "Services host configured."
+          - "  Keycloak : https://{{ keycloak.hostname }}"
+          - "  Realms   : {{ keycloak.realms | join(', ') }}"
+
+  handlers:
+
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

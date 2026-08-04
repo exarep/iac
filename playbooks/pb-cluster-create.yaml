@@ -69,12 +69,17 @@
       register: cluster_create
       changed_when: true
 
+    - name: Read kubeadmin password
+      ansible.builtin.set_fact:
+        kubeadmin_password: "{{ lookup('ansible.builtin.file', install_dir + '/auth/kubeadmin-password') | trim }}"
+
     - name: Display cluster creation summary
       ansible.builtin.debug:
         msg:
           - "Cluster {{ cluster_name }} created successfully."
-          - "  Role        : {{ cluster_config.role }}"
-          - "  Base domain : {{ cluster_config.base_domain }}"
-          - "  API         : api.{{ cluster_name }}.{{ cluster_config.base_domain }}"
-          - "  Console     : console-openshift-console.apps.{{ cluster_name }}.{{ cluster_config.base_domain }}"
-          - "  Kubeconfig  : {{ install_dir }}/auth/kubeconfig"
+          - "  Role              : {{ cluster_config.role }}"
+          - "  Base domain       : {{ cluster_config.base_domain }}"
+          - "  API               : https://api.{{ cluster_name }}.{{ cluster_config.base_domain }}:6443"
+          - "  Console           : https://console-openshift-console.apps.{{ cluster_name }}.{{ cluster_config.base_domain }}"
+          - "  Kubeconfig        : {{ install_dir }}/auth/kubeconfig"
+          - "  Kubeadmin password: {{ kubeadmin_password }}"

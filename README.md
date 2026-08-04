@@ -33,8 +33,9 @@ exarep.com                     ← Cloudflare, authoritative
 - AWS CLI configured (`aws configure`) with Route 53 and EC2 permissions
 - Cloudflare API token with DNS edit permissions for `exarep.com`
 - `openshift-install` CLI (for cluster creation)
-- Pull secret at `~/.pull-secret`
-- SSH public key at `~/.ssh/id_rsa.pub`
+- Pull secret at `~/.pull-secret.txt`
+- SSH key pair at `~/.ssh/exarep`
+- Red Hat registry (registry.redhat.io) credentials (for Keycloak image)
 
 ### Setup
 
@@ -75,3 +76,26 @@ ansible-playbook playbooks/pb-cluster-create.yaml -e cluster_name=mgmt
 ```
 
 Install artifacts (kubeconfig, kubeadmin password) are saved to `.temp/clusters/<cluster_name>/`.
+
+### pb-services-host-create.yaml
+
+Provisions the EC2 services host on AWS with a security group, Elastic IP, and an A record for `auth.exarep.com` in Cloudflare. Instance configuration is in `inventory/group_vars/all/ec2.yaml`.
+
+```bash
+ansible-playbook playbooks/pb-services-host-create.yaml
+```
+
+### pb-services-host-configure.yaml
+
+Configures the services host with Nginx, Keycloak, and PostgreSQL. Requires the services host to be provisioned first. Prompts for Red Hat registry credentials, Keycloak admin password, and database password at runtime.
+
+```bash
+ansible-playbook playbooks/pb-services-host-configure.yaml
+```
+
+This playbook:
+- Installs Podman, Nginx, and certbot
+- Deploys Keycloak and PostgreSQL as Podman containers
+- Obtains a Let's Encrypt TLS certificate for `auth.exarep.com`
+- Configures Nginx as a reverse proxy on port 443
+- Creates the `customer` and `administrator` realms in Keycloak

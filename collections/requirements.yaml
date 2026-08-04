@@ -1,3 +1,4 @@
 collections:
   - name: amazon.aws
+  - name: ansible.posix
   - name: community.general

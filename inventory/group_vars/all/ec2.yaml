@@ -1,0 +1,23 @@
+services_host:
+  instance_type: t3.medium
+  ami_filter: "RHEL-9*-x86_64-*"
+  ami_owner: "309956199498"
+  key_name: exarep
+  security_group: exarep-services-host
+  vpc:
+    name: exarep-services
+    cidr: 172.16.0.0/16
+    subnet_cidr: 172.16.1.0/24
+  tags:
+    Name: exarep-services-host
+    ManagedBy: exarep-iac
+    Role: services
+
+keycloak:
+  hostname: "auth.{{ base_domain }}"
+  admin_user: admin
+  db_name: keycloak
+  db_user: keycloak
+  realms:
+    - customer
+    - administrator

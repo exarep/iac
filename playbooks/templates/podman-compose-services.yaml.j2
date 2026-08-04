@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: registry.access.redhat.com/hi/postgresql:latest
+    container_name: keycloak-postgres
+    environment:
+      POSTGRES_DB: {{ keycloak.db_name }}
+      POSTGRES_USER: {{ keycloak.db_user }}
+      POSTGRES_PASSWORD: "{{ keycloak_db_password }}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - services
+    restart: always
+
+  keycloak:
+    image: registry.redhat.io/rhbk/keycloak-rhel9:26.6
+    container_name: keycloak
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/{{ keycloak.db_name }}
+      KC_DB_USERNAME: {{ keycloak.db_user }}
+      KC_DB_PASSWORD: "{{ keycloak_db_password }}"
+      KC_HOSTNAME: {{ keycloak.hostname }}
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: {{ keycloak.admin_user }}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "{{ keycloak_admin_password }}"
+    command: start
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - services
+    depends_on:
+      - postgres
+    restart: always
+
+volumes:
+  pgdata:
+
+networks:
+  services:
