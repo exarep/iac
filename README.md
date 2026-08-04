@@ -30,8 +30,11 @@ exarep.com                     ← Cloudflare, authoritative
 ### Prerequisites
 
 - Python 3
-- AWS CLI configured (`aws configure`) with Route 53 permissions
+- AWS CLI configured (`aws configure`) with Route 53 and EC2 permissions
 - Cloudflare API token with DNS edit permissions for `exarep.com`
+- `openshift-install` CLI (for cluster creation)
+- Pull secret at `~/.pull-secret`
+- SSH public key at `~/.ssh/id_rsa.pub`
 
 ### Setup
 
@@ -61,3 +64,14 @@ Creates the Route 53 hosted zone for `cluster.exarep.com` and configures NS dele
 ```bash
 ansible-playbook playbooks/pb-dns-setup.yaml
 ```
+
+### pb-cluster-create.yaml
+
+Creates an OpenShift cluster on AWS using IPI. Cluster definitions are in `inventory/group_vars/all/clusters.yaml`.
+
+```bash
+ansible-playbook playbooks/pb-cluster-create.yaml -e cluster_name=svc
+ansible-playbook playbooks/pb-cluster-create.yaml -e cluster_name=mgmt
+```
+
+Install artifacts (kubeconfig, kubeadmin password) are saved to `.temp/clusters/<cluster_name>/`.

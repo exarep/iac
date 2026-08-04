@@ -1,0 +1,36 @@
+pull_secret_file: ~/.pull-secret.txt
+ssh_key_file: ~/.ssh/exarep.pub
+cluster_install_dir: "{{ playbook_dir }}/../.temp/clusters"
+
+clusters:
+  svc:
+    role: services
+    base_domain: "cluster.{{ base_domain }}"
+    region: "{{ aws_region }}"
+    control_plane:
+      replicas: 3
+      instance_type: m6i.xlarge
+    workers:
+      replicas: 3
+      instance_type: m6i.8xlarge
+    networking:
+      cluster_network_cidr: 10.128.0.0/14
+      cluster_network_host_prefix: 23
+      service_network_cidr: 172.30.0.0/16
+      machine_network_cidr: 10.0.0.0/16
+
+  mgmt:
+    role: management
+    base_domain: "cluster.{{ base_domain }}"
+    region: "{{ aws_region }}"
+    control_plane:
+      replicas: 3
+      instance_type: m6i.xlarge
+    workers:
+      replicas: 3
+      instance_type: m6i.8xlarge
+    networking:
+      cluster_network_cidr: 10.132.0.0/14
+      cluster_network_host_prefix: 23
+      service_network_cidr: 172.31.0.0/16
+      machine_network_cidr: 10.1.0.0/16

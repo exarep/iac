@@ -1,0 +1,80 @@
+---
+- name: Create OpenShift cluster on AWS
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Validate cluster_name is provided
+      ansible.builtin.assert:
+        that:
+          - cluster_name is defined
+          - cluster_name in clusters
+        fail_msg: "cluster_name must be provided and match a key in clusters ({{ clusters.keys() | list | join(', ') }})"
+
+    - name: Set cluster config
+      ansible.builtin.set_fact:
+        cluster_config: "{{ clusters[cluster_name] }}"
+        install_dir: "{{ cluster_install_dir }}/{{ cluster_name }}"
+
+    - name: Verify openshift-install is available
+      ansible.builtin.command:
+        cmd: openshift-install version
+      changed_when: false
+      register: openshift_install_version
+
+    - name: Display openshift-install version
+      ansible.builtin.debug:
+        msg: "{{ openshift_install_version.stdout_lines[0] }}"
+
+    - name: Read pull secret
+      ansible.builtin.set_fact:
+        pull_secret: "{{ lookup('ansible.builtin.file', pull_secret_file) | trim }}"
+
+    - name: Read SSH public key
+      ansible.builtin.set_fact:
+        ssh_key: "{{ lookup('ansible.builtin.file', ssh_key_file) | trim }}"
+
+    - name: Check if cluster is already installed
+      ansible.builtin.stat:
+        path: "{{ install_dir }}/metadata.json"
+      register: cluster_metadata
+
+    - name: Abort if cluster already exists
+      ansible.builtin.fail:
+        msg: "Cluster {{ cluster_name }} already exists at {{ install_dir }}. To recreate, run pb-cluster-destroy.yaml first."
+      when: cluster_metadata.stat.exists
+
+    - name: Create install directory
+      ansible.builtin.file:
+        path: "{{ install_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Template install-config.yaml
+      ansible.builtin.template:
+        src: templates/install-config.yaml.j2
+        dest: "{{ install_dir }}/install-config.yaml"
+        mode: "0640"
+
+    - name: Back up install-config.yaml
+      ansible.builtin.copy:
+        src: "{{ install_dir }}/install-config.yaml"
+        dest: "{{ install_dir }}/install-config.yaml.bak"
+        mode: "0640"
+
+    - name: Create OpenShift cluster
+      ansible.builtin.command:
+        cmd: openshift-install create cluster --dir={{ install_dir }} --log-level=info
+      register: cluster_create
+      changed_when: true
+
+    - name: Display cluster creation summary
+      ansible.builtin.debug:
+        msg:
+          - "Cluster {{ cluster_name }} created successfully."
+          - "  Role        : {{ cluster_config.role }}"
+          - "  Base domain : {{ cluster_config.base_domain }}"
+          - "  API         : api.{{ cluster_name }}.{{ cluster_config.base_domain }}"
+          - "  Console     : console-openshift-console.apps.{{ cluster_name }}.{{ cluster_config.base_domain }}"
+          - "  Kubeconfig  : {{ install_dir }}/auth/kubeconfig"

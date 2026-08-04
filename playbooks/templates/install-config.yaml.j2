@@ -1,0 +1,33 @@
+apiVersion: v1
+metadata:
+  name: {{ cluster_name }}
+baseDomain: {{ cluster_config.base_domain }}
+compute:
+  - architecture: amd64
+    hyperthreading: Enabled
+    name: worker
+    platform:
+      aws:
+        type: {{ cluster_config.workers.instance_type }}
+    replicas: {{ cluster_config.workers.replicas }}
+controlPlane:
+  architecture: amd64
+  hyperthreading: Enabled
+  name: control-plane
+  platform:
+    aws:
+      type: {{ cluster_config.control_plane.instance_type }}
+  replicas: {{ cluster_config.control_plane.replicas }}
+networking:
+  clusterNetwork:
+    - cidr: {{ cluster_config.networking.cluster_network_cidr }}
+      hostPrefix: {{ cluster_config.networking.cluster_network_host_prefix }}
+  machineNetwork:
+    - cidr: {{ cluster_config.networking.machine_network_cidr }}
+  serviceNetwork:
+    - {{ cluster_config.networking.service_network_cidr }}
+platform:
+  aws:
+    region: {{ cluster_config.region }}
+pullSecret: '{{ pull_secret }}'
+sshKey: '{{ ssh_key }}'
