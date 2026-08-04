@@ -1,0 +1,120 @@
+---
+- name: Setup DNS delegation from Cloudflare to AWS Route 53
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Read Cloudflare API token
+      ansible.builtin.set_fact:
+        cloudflare_api_token: "{{ lookup('ansible.builtin.file', cloudflare_api_token_file) | trim }}"
+
+    - name: Validate Cloudflare API token
+      ansible.builtin.assert:
+        that:
+          - cloudflare_api_token | length > 0
+        fail_msg: "Cloudflare API token could not be read from {{ cloudflare_api_token_file }}"
+
+    - name: Create Route 53 hosted zone for {{ cluster_domain }}
+      amazon.aws.route53_zone:
+        zone: "{{ cluster_domain }}"
+        comment: "Delegated zone for OpenShift cluster infrastructure"
+        state: present
+        region: "{{ aws_region }}"
+        tags:
+          ManagedBy: exarep-iac
+          Purpose: openshift-cluster-dns
+      register: route53_zone
+
+    - name: Get NS records for {{ cluster_domain }}
+      amazon.aws.route53_info:
+        type: NS
+        hosted_zone_id: "{{ route53_zone.zone_id }}"
+        query: record_sets
+        start_record_name: "{{ cluster_domain }}"
+        max_items: 1
+      register: route53_ns
+
+    - name: Set nameserver list
+      ansible.builtin.set_fact:
+        route53_nameservers: "{{ route53_ns.resource_record_sets | selectattr('type', 'equalto', 'NS') | map(attribute='resource_records') | first | map(attribute='value') | list }}"
+
+    - name: Display Route 53 nameservers
+      ansible.builtin.debug:
+        msg: "Route 53 nameservers for {{ cluster_domain }}: {{ route53_nameservers }}"
+
+    - name: Get Cloudflare zone ID for {{ base_domain }}
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones?name={{ base_domain }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+        return_content: true
+      register: cloudflare_zone
+
+    - name: Set Cloudflare zone ID
+      ansible.builtin.set_fact:
+        cloudflare_zone_id: "{{ cloudflare_zone.json.result[0].id }}"
+
+    - name: Get existing NS records for {{ cluster_domain }} in Cloudflare
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records?type=NS&name={{ cluster_domain }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+        return_content: true
+      register: existing_ns_records
+
+    - name: Build list of existing NS values
+      ansible.builtin.set_fact:
+        existing_ns_values: "{{ existing_ns_records.json.result | map(attribute='content') | list }}"
+
+    - name: Identify stale NS records
+      ansible.builtin.set_fact:
+        stale_ns_records: "{{ existing_ns_records.json.result | rejectattr('content', 'in', route53_nameservers) | list }}"
+
+    - name: Remove stale NS records from Cloudflare
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records/{{ item.id }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+        status_code: [200]
+      loop: "{{ stale_ns_records }}"
+      loop_control:
+        label: "{{ item.content }}"
+      when: stale_ns_records | length > 0
+
+    - name: Create NS delegation records in Cloudflare
+      community.general.cloudflare_dns:
+        zone: "{{ base_domain }}"
+        record: "{{ cluster_domain }}"
+        type: NS
+        value: "{{ item }}"
+        state: present
+        api_token: "{{ cloudflare_api_token }}"
+      loop: "{{ route53_nameservers }}"
+      when: item not in existing_ns_values
+
+    - name: Create CNAME records in Cloudflare
+      community.general.cloudflare_dns:
+        zone: "{{ base_domain }}"
+        record: "{{ item.record }}"
+        type: CNAME
+        value: "{{ item.value }}"
+        state: present
+        solo: true
+        api_token: "{{ cloudflare_api_token }}"
+      loop: "{{ cloudflare_cname_records }}"
+      loop_control:
+        label: "{{ item.record }} → {{ item.value }}"
+
+    - name: Display delegation summary
+      ansible.builtin.debug:
+        msg:
+          - "DNS setup complete."
+          - "  Parent zone  : {{ base_domain }} (Cloudflare)"
+          - "  Delegated    : {{ cluster_domain }} (Route 53 - {{ route53_zone.zone_id }})"
+          - "  Nameservers  : {{ route53_nameservers | join(', ') }}"
+          - "  Stale removed: {{ stale_ns_records | map(attribute='content') | list | join(', ') | default('none', true) }}"
+          - "  CNAME records: {{ cloudflare_cname_records | map(attribute='record') | join(', ') }}"

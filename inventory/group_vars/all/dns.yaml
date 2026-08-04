@@ -1,0 +1,10 @@
+base_domain: exarep.com
+cluster_domain: "cluster.{{ base_domain }}"
+aws_region: us-east-2
+cloudflare_api_token_file: ~/.cloudflare/intexarep-exarep-dns-write
+
+cloudflare_cname_records:
+  - record: "docs.{{ base_domain }}"
+    value: exarep.github.io
+  - record: "ntp.{{ base_domain }}"
+    value: time.cloudflare.com
