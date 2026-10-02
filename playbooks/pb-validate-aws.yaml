@@ -1,0 +1,58 @@
+---
+- name: Validate AWS credentials and discover RHDP network
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Get AWS caller identity
+      amazon.aws.aws_caller_info:
+        region: "{{ aws_region }}"
+      register: caller_info
+
+    - name: Display AWS account context
+      ansible.builtin.debug:
+        msg:
+          - "Account ID: {{ caller_info.account }}"
+          - "Caller ARN: {{ caller_info.arn }}"
+          - "User ID: {{ caller_info.user_id }}"
+          - "Region: {{ aws_region }}"
+
+    - name: Discover VPCs in the region
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ aws_region }}"
+      register: discovered_vpcs
+
+    - name: Display blank network state
+      ansible.builtin.debug:
+        msg: >-
+          No VPCs found in {{ aws_region }}.
+          RHDP Blank Open Environments often start with no default VPC.
+          Later playbooks will provision the network.
+      when: discovered_vpcs.vpcs | length == 0
+
+    - name: Discover subnets for each VPC
+      amazon.aws.ec2_vpc_subnet_info:
+        region: "{{ aws_region }}"
+        filters:
+          vpc-id: "{{ item.id }}"
+      loop: "{{ discovered_vpcs.vpcs }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: discovered_subnets
+      when: discovered_vpcs.vpcs | length > 0
+
+    - name: Display discovered network
+      ansible.builtin.debug:
+        msg:
+          - "VPC ID: {{ item.0.id }}"
+          - "CIDR: {{ item.0.cidr_block }}"
+          - "Is default: {{ item.0.is_default }}"
+          - "Subnet count: {{ item.1.subnets | length }}"
+          - >-
+            Subnets:
+            {% for subnet in item.1.subnets %}
+            {{ subnet.id }} ({{ subnet.availability_zone }}, {{ subnet.cidr_block }})
+            {% endfor %}
+      loop: "{{ discovered_vpcs.vpcs | zip(discovered_subnets.results) | list }}"
+      loop_control:
+        label: "{{ item.0.id }}"
+      when: discovered_vpcs.vpcs | length > 0

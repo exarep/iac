@@ -1,0 +1,8 @@
+---
+# Non-secret defaults for Exarep infrastructure playbooks.
+# Override at runtime with -e or a local untracked vars file.
+
+aws_region: us-east-2
+domain_name: exarep.com
+idp_hostname: auth.exarep.com
+artifact_hostname: artifact.exarep.com
