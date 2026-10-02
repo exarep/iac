@@ -1,0 +1,4 @@
+---
+- name: Restart exarep stack
+  ansible.builtin.command:
+    cmd: /opt/exarep/start-stack.sh

@@ -1,0 +1,75 @@
+---
+- name: Discover services host and publish DNS
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../local_vars.yaml"
+  tasks:
+    - name: Require cloudflare_api_token from local_vars.yaml
+      ansible.builtin.assert:
+        that:
+          - cloudflare_api_token is defined
+          - cloudflare_api_token | length > 0
+          - idp_username is defined
+          - idp_username | length > 0
+          - idp_password is defined
+          - oauth2_proxy_client_secret is defined
+          - oauth2_proxy_cookie_secret is defined
+          - keycloak_admin_password is defined
+          - keycloak_db_password is defined
+          - nexus_admin_password is defined
+        fail_msg: Create gitignored local_vars.yaml with required secrets.
+
+    - name: Find services host instance
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ services_hostname }}"
+          instance-state-name: running
+      register: services_host_info
+
+    - name: Fail when services host is missing
+      ansible.builtin.fail:
+        msg: "No running instance tagged Name={{ services_hostname }}. Run playbooks/pb-services-host.yaml first."
+      when: services_host_info.instances | length == 0
+
+    - name: Find Elastic IP for services host
+      amazon.aws.ec2_eip_info:
+        region: "{{ aws_region }}"
+        filters:
+          instance-id: "{{ services_host_info.instances[0].instance_id }}"
+      register: services_host_eips
+
+    - name: Set services host connection facts
+      ansible.builtin.set_fact:
+        services_host_public_ip: "{{ services_host_eips.addresses[0].public_ip | default(services_host_info.instances[0].public_ip_address) }}"
+        services_host_instance_id: "{{ services_host_info.instances[0].instance_id }}"
+
+    - name: Publish DNS for services host
+      ansible.builtin.include_role:
+        name: services_dns
+
+    - name: Add services host to in-memory inventory
+      ansible.builtin.add_host:
+        name: services
+        groups: services_hosts
+        ansible_host: "{{ services_host_public_ip }}"
+        ansible_user: "{{ services_host_ssh_user }}"
+        ansible_ssh_private_key_file: "{{ services_host_key_path }}"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Wait for SSH on services host
+  hosts: services_hosts
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+- name: Deploy Keycloak, Nexus, and reverse proxy stack
+  hosts: services_hosts
+  become: true
+  vars_files:
+    - "{{ playbook_dir }}/../local_vars.yaml"
+  roles:
+    - role: services_stack

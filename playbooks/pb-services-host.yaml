@@ -1,0 +1,6 @@
+---
+- name: Provision Exarep services host foundation
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - role: services_host

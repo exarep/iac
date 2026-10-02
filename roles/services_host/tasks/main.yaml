@@ -1,0 +1,171 @@
+---
+- name: Gather availability zones
+  amazon.aws.aws_az_info:
+    region: "{{ aws_region }}"
+  register: services_host_azs
+
+- name: Ensure VPC exists
+  amazon.aws.ec2_vpc_net:
+    name: "{{ services_host_vpc_name }}"
+    cidr_block: "{{ services_host_vpc_cidr }}"
+    region: "{{ aws_region }}"
+    dns_hostnames: true
+    dns_support: true
+    tags:
+      Name: "{{ services_host_vpc_name }}"
+    state: present
+  register: services_host_vpc
+
+- name: Ensure public subnet exists
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ services_host_vpc.vpc.id }}"
+    cidr: "{{ services_host_subnet_cidr }}"
+    az: "{{ services_host_azs.availability_zones[0].zone_name }}"
+    map_public: true
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ services_host_vpc_name }}-public"
+    state: present
+  register: services_host_subnet
+
+- name: Ensure internet gateway exists
+  amazon.aws.ec2_vpc_igw:
+    vpc_id: "{{ services_host_vpc.vpc.id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ services_host_vpc_name }}-igw"
+    state: present
+  register: services_host_igw
+
+- name: Ensure public route table exists
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ services_host_vpc.vpc.id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ services_host_vpc_name }}-public"
+    subnets:
+      - "{{ services_host_subnet.subnet.id }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ services_host_igw.gateway_id }}"
+    state: present
+
+- name: Ensure services host security group exists
+  amazon.aws.ec2_security_group:
+    name: "{{ services_hostname }}"
+    description: Security group for Exarep services host
+    vpc_id: "{{ services_host_vpc.vpc.id }}"
+    region: "{{ aws_region }}"
+    rules:
+      - proto: tcp
+        ports:
+          - 22
+        cidr_ip: 0.0.0.0/0
+        rule_desc: SSH
+      - proto: tcp
+        ports:
+          - 80
+        cidr_ip: 0.0.0.0/0
+        rule_desc: HTTP ACME
+      - proto: tcp
+        ports:
+          - 443
+        cidr_ip: 0.0.0.0/0
+        rule_desc: HTTPS
+    tags:
+      Name: "{{ services_hostname }}"
+    state: present
+  register: services_host_sg
+
+- name: Ensure local SSH directory exists
+  ansible.builtin.file:
+    path: "{{ services_host_key_path | dirname }}"
+    state: directory
+    mode: "0700"
+
+- name: Ensure EC2 key pair exists
+  amazon.aws.ec2_key:
+    name: "{{ services_host_key_name }}"
+    region: "{{ aws_region }}"
+    file_name: "{{ services_host_key_path }}"
+    key_type: ed25519
+    state: present
+  no_log: true
+
+- name: Ensure private key file permissions
+  ansible.builtin.file:
+    path: "{{ services_host_key_path }}"
+    mode: "0600"
+  when: services_host_key_path is exists
+
+- name: Find latest RHEL 9 AMI from Red Hat
+  amazon.aws.ec2_ami_info:
+    region: "{{ aws_region }}"
+    owners: "{{ services_host_ami_owners }}"
+    filters:
+      name: "{{ services_host_ami_name_pattern }}"
+      state: available
+      architecture: x86_64
+      root-device-type: ebs
+      virtualization-type: hvm
+  register: services_host_amis
+
+- name: Fail when no RHEL AMI is found
+  ansible.builtin.fail:
+    msg: >-
+      No RHEL 9 AMI matching '{{ services_host_ami_name_pattern }}'
+      found in {{ aws_region }} from owners {{ services_host_ami_owners }}.
+  when: services_host_amis.images | length == 0
+
+- name: Select latest RHEL AMI
+  ansible.builtin.set_fact:
+    services_host_ami_id: "{{ (services_host_amis.images | sort(attribute='creation_date') | last).image_id }}"
+
+- name: Ensure services host EC2 instance exists
+  amazon.aws.ec2_instance:
+    name: "{{ services_hostname }}"
+    region: "{{ aws_region }}"
+    key_name: "{{ services_host_key_name }}"
+    instance_type: "{{ services_host_instance_type }}"
+    image_id: "{{ services_host_ami_id }}"
+    vpc_subnet_id: "{{ services_host_subnet.subnet.id }}"
+    security_groups:
+      - "{{ services_host_sg.group_id }}"
+    volumes:
+      - device_name: /dev/sda1
+        ebs:
+          volume_size: "{{ services_host_volume_size_gb }}"
+          volume_type: gp3
+          delete_on_termination: true
+    tags:
+      Name: "{{ services_hostname }}"
+      Hostname: "{{ services_hostname }}"
+      Role: services-host
+    wait: true
+    wait_timeout: 600
+    state: running
+  register: services_host_instance
+
+- name: Ensure Elastic IP is associated with the services host
+  amazon.aws.ec2_eip:
+    device_id: "{{ services_host_instance.instance_ids[0] }}"
+    in_vpc: true
+    region: "{{ aws_region }}"
+    reuse_existing_ip_allowed: true
+    tag_name: Name
+    tag_value: "{{ services_hostname }}"
+    tags:
+      Name: "{{ services_hostname }}"
+    state: present
+  register: services_host_eip
+
+- name: Display services host connection details
+  ansible.builtin.debug:
+    msg:
+      - "Hostname: {{ services_hostname }}"
+      - "Instance ID: {{ services_host_instance.instance_ids[0] }}"
+      - "AMI ID: {{ services_host_ami_id }}"
+      - "Public IP: {{ services_host_eip.public_ip }}"
+      - "SSH key: {{ services_host_key_path }}"
+      - "SSH: ssh -i {{ services_host_key_path }} ec2-user@{{ services_host_eip.public_ip }}"
+      - "DNS for {{ services_hostname }} is not configured yet (Route53/Cloudflare comes later)."

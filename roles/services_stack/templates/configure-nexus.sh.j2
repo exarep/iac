@@ -1,0 +1,212 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_NAME="exarep-nexus-sso"
+ADMIN_PASSWORD_FILE="/opt/exarep/nexus-data/admin.password"
+NEXUS_PROPS="/opt/exarep/nexus-data/etc/nexus.properties"
+NEXUS_ADMIN_PASSWORD='{{ nexus_admin_password }}'
+IDP_USERNAME='{{ idp_username }}'
+IDP_EMAIL='{{ idp_email }}'
+IDP_FIRST_NAME='{{ idp_first_name }}'
+IDP_LAST_NAME='{{ idp_last_name }}'
+# Local Nexus password is unused for SSO (Rut Auth); required only when creating the user record.
+SSO_USER_PASSWORD="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
+
+if [[ -f "${NEXUS_PROPS}" ]] && ! grep -q '^nexus.scripts.allowCreation=true' "${NEXUS_PROPS}"; then
+  printf '\nnexus.scripts.allowCreation=true\n' >> "${NEXUS_PROPS}"
+  podman restart exarep-nexus >/dev/null
+  for _ in $(seq 1 90); do
+    if podman exec exarep-nexus bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081' 2>/dev/null; then
+      sleep 20
+      break
+    fi
+    sleep 5
+  done
+fi
+
+for _ in $(seq 1 90); do
+  if podman exec exarep-nexus curl -sf "http://localhost:8081/service/rest/v1/status" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+# Complete Nexus first-boot admin password change when the generated file is present.
+if [[ -f "${ADMIN_PASSWORD_FILE}" ]]; then
+  INITIAL_PASS="$(tr -d '\r\n' < "${ADMIN_PASSWORD_FILE}")"
+  podman exec exarep-nexus curl -sf -u "admin:${INITIAL_PASS}" -X PUT \
+    -H "Content-Type: text/plain" \
+    --data "${NEXUS_ADMIN_PASSWORD}" \
+    "http://localhost:8081/service/rest/v1/security/users/admin/change-password" >/dev/null \
+    || true
+fi
+
+AUTH="admin:${NEXUS_ADMIN_PASSWORD}"
+
+# Verify admin credentials work
+if ! podman exec exarep-nexus curl -sf -u "${AUTH}" \
+  "http://localhost:8081/service/rest/v1/status" >/dev/null; then
+  echo "Nexus admin authentication failed with nexus_admin_password"
+  exit 1
+fi
+
+podman exec exarep-nexus curl -sf -u "${AUTH}" -X PUT \
+  -H "Content-Type: application/json" \
+  "http://localhost:8081/service/rest/v1/security/realms/active" \
+  -d '["rutauth-realm","NexusAuthenticatingRealm","DefaultRole"]' >/dev/null
+
+podman exec exarep-nexus curl -sf -u "${AUTH}" -X PUT \
+  -H "Content-Type: application/json" \
+  "http://localhost:8081/service/rest/v1/security/anonymous" \
+  -d '{"enabled":false,"userId":"anonymous","realmName":"NexusAuthorizingRealm"}' >/dev/null || true
+
+# Admin role for SSO users: all privileges except self-service password change.
+# Nexus My Account hides PasswordChangeForm unless nexus:userschangepw:create is granted.
+ROLE_JSON="$(podman exec exarep-nexus curl -sf -u "${AUTH}" \
+  "http://localhost:8081/service/rest/v1/security/privileges" | python3 -c '
+import json, sys
+privs = json.load(sys.stdin)
+names = [p["name"] for p in privs if p.get("name") not in ("nx-all", "nx-userschangepw")]
+print(json.dumps({
+  "id": "exarep-admin",
+  "name": "exarep-admin",
+  "description": "Admin without self-service password change (SSO)",
+  "privileges": names,
+  "roles": [],
+}))
+')"
+ROLE_CODE="$(podman exec exarep-nexus curl -s -o /dev/null -w '%{http_code}' -u "${AUTH}" \
+  "http://localhost:8081/service/rest/v1/security/roles/exarep-admin" || true)"
+if [[ "${ROLE_CODE}" == "200" ]]; then
+  podman exec exarep-nexus curl -sf -u "${AUTH}" -X PUT \
+    -H "Content-Type: application/json" \
+    "http://localhost:8081/service/rest/v1/security/roles/exarep-admin" \
+    -d "${ROLE_JSON}" >/dev/null
+else
+  podman exec exarep-nexus curl -sf -u "${AUTH}" -X POST \
+    -H "Content-Type: application/json" \
+    "http://localhost:8081/service/rest/v1/security/roles" \
+    -d "${ROLE_JSON}" >/dev/null
+fi
+
+# Ensure SSO user records exist for username and email identity forms.
+SSO_USER_IDS=("${IDP_USERNAME}")
+if [[ "${IDP_EMAIL}" != "${IDP_USERNAME}" ]]; then
+  SSO_USER_IDS+=("${IDP_EMAIL}")
+fi
+
+for USER_ID in "${SSO_USER_IDS[@]}"; do
+  CODE="$(podman exec exarep-nexus curl -s -o /dev/null -w '%{http_code}' -u "${AUTH}" \
+    "http://localhost:8081/service/rest/v1/security/users/${USER_ID}" || true)"
+  if [[ "${CODE}" == "200" ]]; then
+    UPDATE_BODY="$(python3 - <<PY
+import json
+print(json.dumps({
+  "userId": """${USER_ID}""",
+  "firstName": """${IDP_FIRST_NAME}""",
+  "lastName": """${IDP_LAST_NAME}""",
+  "emailAddress": """${IDP_EMAIL}""",
+  "source": "default",
+  "status": "active",
+  "roles": ["exarep-admin"],
+}))
+PY
+)"
+    podman exec exarep-nexus curl -sf -u "${AUTH}" -X PUT \
+      -H "Content-Type: application/json" \
+      "http://localhost:8081/service/rest/v1/security/users/${USER_ID}" \
+      -d "${UPDATE_BODY}" >/dev/null || true
+  else
+    BODY="$(python3 - <<PY
+import json
+print(json.dumps({
+  "userId": """${USER_ID}""",
+  "firstName": """${IDP_FIRST_NAME}""",
+  "lastName": """${IDP_LAST_NAME}""",
+  "emailAddress": """${IDP_EMAIL}""",
+  "password": """${SSO_USER_PASSWORD}""",
+  "source": "default",
+  "status": "active",
+  "roles": ["exarep-admin"],
+}))
+PY
+)"
+    podman exec exarep-nexus curl -sf -u "${AUTH}" -X POST \
+      -H "Content-Type: application/json" \
+      "http://localhost:8081/service/rest/v1/security/users" \
+      -d "${BODY}" >/dev/null || true
+  fi
+done
+
+PAYLOAD="$(python3 - <<'PY'
+import json
+content = r'''
+import org.sonatype.nexus.capability.CapabilityReference
+import org.sonatype.nexus.capability.CapabilityType
+import org.sonatype.nexus.security.realm.RealmManager
+
+def realmManager = container.lookup(RealmManager.class.name)
+realmManager.enableRealm("rutauth-realm")
+realmManager.enableRealm("DefaultRole")
+
+def capabilityRegistry = container.lookup(org.sonatype.nexus.capability.CapabilityRegistry.class.name)
+
+def rutType = CapabilityType.capabilityType("rutauth")
+def rutExisting = capabilityRegistry.all.find { CapabilityReference ref ->
+  ref.context().descriptor().type() == rutType
+}
+def rutNotes = "Exarep oauth2-proxy preferred username"
+def rutProps = ["httpHeader": "X-Forwarded-Preferred-Username"]
+if (rutExisting) {
+  capabilityRegistry.update(rutExisting.context().id(), true, rutNotes, rutProps)
+} else {
+  capabilityRegistry.add(rutType, true, rutNotes, rutProps)
+}
+
+def roleType = CapabilityType.capabilityType("defaultrole")
+def roleExisting = capabilityRegistry.all.find { CapabilityReference ref ->
+  ref.context().descriptor().type() == roleType
+}
+def roleNotes = "Exarep default role for SSO users (no password change)"
+def roleProps = ["role": "exarep-admin"]
+if (roleExisting) {
+  capabilityRegistry.update(roleExisting.context().id(), true, roleNotes, roleProps)
+  return "UPDATED:rutauth+defaultrole:exarep-admin"
+}
+capabilityRegistry.add(roleType, true, roleNotes, roleProps)
+return "ADDED:rutauth+defaultrole:exarep-admin"
+'''
+print(json.dumps({"name": "exarep-nexus-sso", "type": "groovy", "content": content}))
+PY
+)"
+
+HTTP_CODE="$(podman exec exarep-nexus curl -s -o /dev/null -w '%{http_code}' -u "${AUTH}" \
+  "http://localhost:8081/service/rest/v1/script/${SCRIPT_NAME}" || true)"
+
+if [[ "${HTTP_CODE}" == "200" ]]; then
+  podman exec exarep-nexus curl -sf -u "${AUTH}" -X PUT \
+    -H "Content-Type: application/json" \
+    "http://localhost:8081/service/rest/v1/script/${SCRIPT_NAME}" \
+    -d "${PAYLOAD}" >/dev/null
+else
+  podman exec exarep-nexus curl -sf -u "${AUTH}" -X POST \
+    -H "Content-Type: application/json" \
+    "http://localhost:8081/service/rest/v1/script" \
+    -d "${PAYLOAD}" >/dev/null
+fi
+
+RESULT="$(podman exec exarep-nexus curl -sf -u "${AUTH}" -X POST \
+  -H "Content-Type: text/plain" \
+  "http://localhost:8081/service/rest/v1/script/${SCRIPT_NAME}/run")"
+
+echo "${RESULT}"
+
+CODE="$(podman exec exarep-nexus curl -s -o /dev/null -w '%{http_code}' \
+  -H "X-Forwarded-Preferred-Username: ${IDP_USERNAME}" \
+  http://localhost:8081/service/rest/v1/security/users || true)"
+echo "SSO_USERS_HTTP:${CODE}"
+echo "CHANGED"

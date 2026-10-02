@@ -1,0 +1,113 @@
+#!/bin/bash
+set -euo pipefail
+
+cd /opt/exarep
+export PATH="/usr/local/bin:/usr/bin:/bin"
+
+NETWORK_NAME="exarep"
+
+if ! podman network exists "${NETWORK_NAME}"; then
+  podman network create "${NETWORK_NAME}"
+fi
+
+ensure_running() {
+  local name="$1"
+  shift
+  if podman container exists "${name}"; then
+    local status
+    status="$(podman inspect -f '{% raw %}{{.State.Status}}{% endraw %}' "${name}")"
+    if [[ "${status}" == "running" ]]; then
+      echo "${name} already running"
+      return 0
+    fi
+    podman rm -f "${name}" >/dev/null
+  fi
+  podman run -d --name "${name}" --network "${NETWORK_NAME}" --restart unless-stopped "$@"
+}
+
+force_running() {
+  local name="$1"
+  shift
+  if podman container exists "${name}"; then
+    podman rm -f "${name}" >/dev/null
+  fi
+  podman run -d --name "${name}" --network "${NETWORK_NAME}" --restart unless-stopped "$@"
+}
+
+# Postgres
+ensure_running exarep-postgres \
+  -e POSTGRES_DB=keycloak \
+  -e POSTGRES_USER=keycloak \
+  -e POSTGRES_PASSWORD='{{ keycloak_db_password }}' \
+  -v /opt/exarep/postgres:/var/lib/postgresql/data:Z \
+  {{ postgres_image }}
+
+for _ in $(seq 1 30); do
+  if podman exec exarep-postgres pg_isready -U keycloak -d keycloak >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+# Keycloak
+ensure_running exarep-keycloak \
+  -e KC_DB=postgres \
+  -e KC_DB_URL=jdbc:postgresql://exarep-postgres:5432/keycloak \
+  -e KC_DB_USERNAME=keycloak \
+  -e KC_DB_PASSWORD='{{ keycloak_db_password }}' \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME='{{ keycloak_admin_user }}' \
+  -e KC_BOOTSTRAP_ADMIN_PASSWORD='{{ keycloak_admin_password }}' \
+  -e KC_HOSTNAME={{ idp_hostname }} \
+  -e KC_HOSTNAME_STRICT=true \
+  -e KC_HTTP_ENABLED=true \
+  -e KC_PROXY_HEADERS=xforwarded \
+  -e KC_HEALTH_ENABLED=true \
+  -e KC_CACHE=local \
+  -v /opt/exarep/keycloak/import:/opt/keycloak/data/import:Z \
+  {{ keycloak_image }} start --import-realm
+
+# Nexus
+ensure_running exarep-nexus \
+  -v /opt/exarep/nexus-data:/nexus-data:Z \
+  {{ nexus_image }}
+
+for _ in $(seq 1 90); do
+  if podman exec exarep-keycloak bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' 2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
+
+force_running exarep-caddy \
+  -p 80:80 \
+  -p 443:443 \
+  -v /opt/exarep/caddy/Caddyfile:/etc/caddy/Caddyfile:Z \
+  -v /opt/exarep/caddy/data:/data:Z \
+  -v /opt/exarep/caddy/config:/config:Z \
+  {{ caddy_image }}
+
+sleep 5
+
+# oauth2-proxy terminates SSO and proxies to Nexus, injecting identity headers.
+force_running exarep-oauth2-proxy \
+  --add-host={{ idp_hostname }}:host-gateway \
+  {{ oauth2_proxy_image }} \
+  --http-address=0.0.0.0:4180 \
+  --provider=keycloak-oidc \
+  --oidc-issuer-url=https://{{ idp_hostname }}/realms/{{ keycloak_realm }} \
+  --client-id={{ oauth2_proxy_client_id }} \
+  --client-secret='{{ oauth2_proxy_client_secret }}' \
+  --redirect-url=https://{{ artifact_hostname }}/oauth2/callback \
+  --upstream=http://exarep-nexus:8081 \
+  --email-domain='*' \
+  --cookie-secure=true \
+  --cookie-secret='{{ oauth2_proxy_cookie_secret }}' \
+  --set-xauthrequest=true \
+  --pass-access-token=false \
+  --pass-user-headers=true \
+  --skip-provider-button=true \
+  --code-challenge-method=S256 \
+  --reverse-proxy=true \
+  --prefer-email-to-user=false
+
+podman ps --format 'table {% raw %}{{.Names}}\t{{.Status}}{% endraw %}'

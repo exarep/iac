@@ -1,0 +1,17 @@
+---
+# Copy to local_vars.yaml (gitignored) and fill in real values.
+# Do not commit local_vars.yaml.
+
+cloudflare_api_token: "replace-me"
+keycloak_admin_user: admin
+keycloak_admin_password: "generate-a-strong-password"
+keycloak_db_password: "generate-a-strong-password"
+oauth2_proxy_client_secret: "generate-a-strong-password"
+oauth2_proxy_cookie_secret: "generate-a-32-byte-urlsafe-secret"
+nexus_admin_password: "generate-a-strong-password"
+idp_username: demo
+idp_password: "replace-me"
+# Optional profile overrides (defaults derive from idp_username + domain_name):
+# idp_email: demo@exarep.com
+# idp_first_name: Demo
+# idp_last_name: User

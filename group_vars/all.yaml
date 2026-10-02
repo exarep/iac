@@ -4,5 +4,33 @@
 
 aws_region: us-east-2
 domain_name: exarep.com
+services_hostname: services.exarep.com
 idp_hostname: auth.exarep.com
-artifact_hostname: artifact.exarep.com
+artifact_hostname: artifacts.exarep.com
+
+# Services host foundation
+services_host_vpc_name: exarep
+services_host_vpc_cidr: 10.0.0.0/16
+services_host_subnet_cidr: 10.0.1.0/24
+services_host_instance_type: t3.large
+services_host_volume_size_gb: 50
+services_host_key_name: exarep-services
+services_host_key_path: "{{ lookup('env', 'HOME') }}/.ssh/exarep-services.pem"
+services_host_ami_owners:
+  - "309956199498"
+services_host_ami_name_pattern: RHEL-9*_HVM-*-x86_64-*-Hourly2-GP3
+services_host_ssh_user: ec2-user
+
+# Keycloak / Nexus stack
+keycloak_realm: exarep
+keycloak_image: quay.io/keycloak/keycloak:26.3
+postgres_image: docker.io/library/postgres:16
+nexus_image: docker.io/sonatype/nexus3:3.84.1
+caddy_image: docker.io/library/caddy:2.10
+oauth2_proxy_image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
+oauth2_proxy_client_id: nexus
+
+# SSO user profile defaults (override in local_vars.yaml as needed)
+idp_email: "{{ idp_username }}@{{ domain_name }}"
+idp_first_name: "{{ idp_username }}"
+idp_last_name: User

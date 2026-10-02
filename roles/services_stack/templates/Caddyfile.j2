@@ -1,0 +1,17 @@
+{{ services_hostname }} {
+	respond "Exarep services host" 200
+}
+
+{{ idp_hostname }} {
+	reverse_proxy exarep-keycloak:8080
+}
+
+{{ artifact_hostname }} {
+	reverse_proxy exarep-oauth2-proxy:4180 {
+		# Prevent empty client identity headers from suppressing oauth2-proxy injection.
+		header_up -X-Forwarded-User
+		header_up -X-Forwarded-Email
+		header_up -X-Forwarded-Preferred-Username
+		header_up -REMOTE_USER
+	}
+}

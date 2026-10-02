@@ -1,0 +1,155 @@
+---
+- name: Install Podman and container tools
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - python3-pip
+    state: present
+
+- name: Install podman-compose
+  ansible.builtin.pip:
+    name: podman-compose
+    state: present
+    executable: pip3
+
+- name: Ensure exarep directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ services_host_ssh_user }}"
+    group: "{{ services_host_ssh_user }}"
+    mode: "0755"
+  loop:
+    - /opt/exarep
+    - /opt/exarep/caddy
+    - /opt/exarep/caddy/data
+    - /opt/exarep/caddy/config
+    - /opt/exarep/keycloak
+    - /opt/exarep/keycloak/import
+    - /opt/exarep/nexus-data
+    - /opt/exarep/postgres
+
+- name: Ensure nexus data directory is writable by container UID 200
+  ansible.builtin.file:
+    path: /opt/exarep/nexus-data
+    state: directory
+    owner: "200"
+    group: "200"
+    mode: "0755"
+
+- name: Deploy Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /opt/exarep/caddy/Caddyfile
+    mode: "0644"
+
+- name: Deploy Keycloak realm import
+  ansible.builtin.template:
+    src: realm-exarep.json.j2
+    dest: /opt/exarep/keycloak/import/exarep-realm.json
+    owner: "1000"
+    group: "1000"
+    mode: "0644"
+
+- name: Deploy stack start script
+  ansible.builtin.template:
+    src: start-stack.sh.j2
+    dest: /opt/exarep/start-stack.sh
+    mode: "0755"
+
+- name: Deploy Nexus configuration script
+  ansible.builtin.template:
+    src: configure-nexus.sh.j2
+    dest: /opt/exarep/configure-nexus.sh
+    mode: "0755"
+
+- name: Allow container ports in firewalld if present
+  ansible.builtin.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - 80/tcp
+    - 443/tcp
+  failed_when: false
+
+- name: Pull container images
+  ansible.builtin.command:
+    cmd: "podman pull {{ item }}"
+  loop:
+    - "{{ caddy_image }}"
+    - "{{ keycloak_image }}"
+    - "{{ postgres_image }}"
+    - "{{ nexus_image }}"
+    - "{{ oauth2_proxy_image }}"
+  register: services_stack_pull
+  changed_when: "'Downloading' in services_stack_pull.stdout or 'Copying' in services_stack_pull.stdout"
+
+- name: Start exarep container stack
+  ansible.builtin.command:
+    cmd: /opt/exarep/start-stack.sh
+  register: services_stack_up
+  changed_when: true
+
+- name: Wait for Keycloak container health
+  ansible.builtin.command:
+    cmd: podman exec exarep-keycloak bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'
+  register: keycloak_ready
+  retries: 90
+  delay: 10
+  until: keycloak_ready.rc == 0
+  changed_when: false
+
+- name: Wait for Nexus container health
+  ansible.builtin.command:
+    cmd: podman exec exarep-nexus bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081'
+  register: nexus_ready
+  retries: 90
+  delay: 10
+  until: nexus_ready.rc == 0
+  changed_when: false
+
+- name: Wait for public HTTPS on auth hostname
+  ansible.builtin.uri:
+    url: "https://{{ idp_hostname }}/"
+    method: GET
+    validate_certs: true
+    follow_redirects: safe
+    status_code: [200, 302]
+  delegate_to: localhost
+  become: false
+  register: auth_https_ready
+  retries: 60
+  delay: 10
+  until: auth_https_ready is succeeded
+
+- name: Wait for public HTTPS on artifacts hostname
+  ansible.builtin.uri:
+    url: "https://{{ artifact_hostname }}/"
+    method: GET
+    validate_certs: true
+    follow_redirects: none
+    status_code: [200, 302, 303, 307]
+  delegate_to: localhost
+  become: false
+  register: artifacts_https_ready
+  retries: 60
+  delay: 10
+  until: artifacts_https_ready is succeeded
+
+- name: Configure Nexus Rut Auth for Keycloak identity headers
+  ansible.builtin.command:
+    cmd: /opt/exarep/configure-nexus.sh
+  register: nexus_configure
+  changed_when: "'CHANGED' in nexus_configure.stdout"
+  retries: 30
+  delay: 10
+  until: nexus_configure.rc == 0
+
+- name: Display stack endpoints
+  ansible.builtin.debug:
+    msg:
+      - "Keycloak: https://{{ idp_hostname }}/"
+      - "Nexus via SSO: https://{{ artifact_hostname }}/"
+      - "Login user: {{ idp_username }}"

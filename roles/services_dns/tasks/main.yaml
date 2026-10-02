@@ -1,0 +1,47 @@
+---
+- name: Ensure Route53 hosted zone exists
+  amazon.aws.route53_zone:
+    zone: "{{ domain_name }}"
+    comment: Exarep DNS managed in AWS
+    state: present
+  register: services_route53_zone
+
+- name: Ensure Route53 A records point at the services host EIP
+  amazon.aws.route53:
+    state: present
+    zone: "{{ domain_name }}"
+    record: "{{ item }}"
+    type: A
+    ttl: 60
+    value: "{{ services_host_public_ip }}"
+    overwrite: true
+    wait: true
+  loop:
+    - "{{ services_hostname }}"
+    - "{{ idp_hostname }}"
+    - "{{ artifact_hostname }}"
+
+- name: Ensure Cloudflare A records forward to the services host EIP
+  community.general.cloudflare_dns:
+    zone: "{{ domain_name }}"
+    api_token: "{{ cloudflare_api_token }}"
+    record: "{{ item }}"
+    type: A
+    value: "{{ services_host_public_ip }}"
+    ttl: 60
+    solo: true
+    state: present
+  loop:
+    - services
+    - auth
+    - artifacts
+  no_log: true
+
+- name: Display DNS summary
+  ansible.builtin.debug:
+    msg:
+      - "EIP: {{ services_host_public_ip }}"
+      - "Route53 zone ID: {{ services_route53_zone.zone_id }}"
+      - "Cloudflare A records updated for services/auth/artifacts"
+      - "Route53 name servers: {{ services_route53_zone.name_servers | default(services_route53_zone.set.NameServers | default([])) }}"
+      - "Point registrar/Cloudflare NS at Route53 name servers for full AWS DNS authority when ready."

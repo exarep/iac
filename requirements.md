@@ -9,5 +9,6 @@
 
 There is a single EC2 instance that hosts Exarep's "existing" services. These are services typically hosted outside of OpenShift and are already in place. The single EC2 instance will host a myriad of services, which will require the host to have a proxy listening on port 443 and routing based on the request header. 
 
+* Host - services.exarep.com
 * Identity Provider - auth.exarep.com (Keycloak)
-* Artifact Repository - artifact.exarep.com (Sonatype Nexus Repository)
+* Artifact Repository - artifacts.exarep.com (Sonatype Nexus Repository)
