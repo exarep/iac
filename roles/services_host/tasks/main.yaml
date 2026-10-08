@@ -167,5 +167,5 @@
       - "AMI ID: {{ services_host_ami_id }}"
       - "Public IP: {{ services_host_eip.public_ip }}"
       - "SSH key: {{ services_host_key_path }}"
-      - "SSH: ssh -i {{ services_host_key_path }} ec2-user@{{ services_host_eip.public_ip }}"
+      - "SSH: ssh -o IdentitiesOnly=yes -i {{ services_host_key_path }} {{ services_host_ssh_user }}@{{ services_host_eip.public_ip }}"
       - "DNS for {{ services_hostname }} is not configured yet (Route53/Cloudflare comes later)."
